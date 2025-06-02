@@ -323,6 +323,8 @@ class UnityDependencyAnalyzer:
             meta_files = list(Path(project_root).rglob("*.meta"))
             total_files = len(meta_files)
             
+            st.info(f"Found {total_files} .meta files to process")
+            
             if total_files == 0:
                 st.warning("No .meta files found. Make sure you uploaded a complete Unity project.")
                 return guid_map
@@ -371,6 +373,7 @@ class UnityDependencyAnalyzer:
             progress_bar.empty()
             status_text.empty()
         
+        st.success(f"Built GUID index with {len(guid_map)} entries")
         return guid_map
     
     def extract_guid_references(self, filepath: str) -> Set[str]:
@@ -383,8 +386,8 @@ class UnityDependencyAnalyzer:
                 matches = re.findall(r"guid:\s*([0-9a-f]{32})", text)
                 guids.update(matches)
         except Exception as e:
-            # Silently skip problematic files
-            pass
+            # Log error but don't stop processing
+            st.warning(f"Error reading {filepath}: {str(e)}")
         
         return guids
     
@@ -392,44 +395,84 @@ class UnityDependencyAnalyzer:
         """Scan scenes and prefabs for dependencies"""
         dependencies = {}
         
-        # Find all scene and prefab files
-        unity_files = list(Path(project_root).rglob("*.unity"))
-        prefab_files = list(Path(project_root).rglob("*.prefab"))
-        all_files = unity_files + prefab_files
-        
-        if not all_files:
-            st.warning("No Unity scene or prefab files found.")
-            return dependencies
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
         try:
+            # Find all scene and prefab files with detailed logging
+            st.info("Searching for Unity scene and prefab files...")
+            
+            unity_files = list(Path(project_root).rglob("*.unity"))
+            prefab_files = list(Path(project_root).rglob("*.prefab"))
+            
+            st.info(f"Found {len(unity_files)} scene files (.unity)")
+            st.info(f"Found {len(prefab_files)} prefab files (.prefab)")
+            
+            # Debug: Show some example files found
+            if unity_files:
+                st.success(f"Example scene files found:")
+                for scene in unity_files[:3]:  # Show first 3
+                    rel_path = os.path.relpath(scene, project_root)
+                    st.text(f"  - {rel_path}")
+                if len(unity_files) > 3:
+                    st.text(f"  ... and {len(unity_files) - 3} more")
+            else:
+                st.warning("❌ No scene files (.unity) found!")
+                st.info("Make sure your ZIP contains Unity scene files with .unity extension.")
+            
+            if prefab_files:
+                st.success(f"Example prefab files found:")
+                for prefab in prefab_files[:3]:  # Show first 3
+                    rel_path = os.path.relpath(prefab, project_root)
+                    st.text(f"  - {rel_path}")
+                if len(prefab_files) > 3:
+                    st.text(f"  ... and {len(prefab_files) - 3} more")
+            
+            all_files = unity_files + prefab_files
+            
+            if not all_files:
+                st.error("No Unity scene or prefab files found in the uploaded project!")
+                st.info("""
+                **Troubleshooting:**
+                1. Make sure your ZIP contains an 'Assets' folder
+                2. Scene files should have .unity extension
+                3. Prefab files should have .prefab extension
+                4. Check if you uploaded the correct Unity project ZIP
+                """)
+                return dependencies
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
             for idx, file_path in enumerate(all_files):
-                rel_path = os.path.relpath(file_path, project_root).replace("\\", "/")
-                guids = self.extract_guid_references(str(file_path))
-                
-                # Convert GUIDs to asset paths
-                asset_paths = set()
-                for guid in guids:
-                    if guid in self.guid_index:
-                        asset_paths.add(self.guid_index[guid])
-                    else:
-                        asset_paths.add(f"<UNKNOWN GUID {guid}>")
-                
-                dependencies[rel_path] = asset_paths
-                
-                # Update progress
-                progress = (idx + 1) / len(all_files)
-                progress_bar.progress(progress)
-                status_text.text(f"Scanning Unity files: {idx + 1}/{len(all_files)}")
-        
-        except Exception as e:
-            st.error(f"Error scanning Unity files: {str(e)}")
-        finally:
+                try:
+                    rel_path = os.path.relpath(file_path, project_root).replace("\\", "/")
+                    guids = self.extract_guid_references(str(file_path))
+                    
+                    # Convert GUIDs to asset paths
+                    asset_paths = set()
+                    for guid in guids:
+                        if guid in self.guid_index:
+                            asset_paths.add(self.guid_index[guid])
+                        else:
+                            asset_paths.add(f"<UNKNOWN GUID {guid}>")
+                    
+                    dependencies[rel_path] = asset_paths
+                    
+                    # Update progress
+                    progress = (idx + 1) / len(all_files)
+                    progress_bar.progress(progress)
+                    status_text.text(f"Scanning Unity files: {idx + 1}/{len(all_files)} - {os.path.basename(file_path)}")
+                    
+                except Exception as e:
+                    st.warning(f"Error processing {file_path}: {str(e)}")
+                    continue
+            
             progress_bar.empty()
             status_text.empty()
+            
+        except Exception as e:
+            st.error(f"Error during scene/prefab scanning: {str(e)}")
+            return {}
         
+        st.success(f"Successfully scanned {len(dependencies)} Unity files")
         return dependencies
     
     def extract_script_dependencies(self, cs_filepath: str) -> Set[str]:
@@ -469,6 +512,8 @@ class UnityDependencyAnalyzer:
         G = nx.DiGraph()
         node_types = {}
         
+        st.info("Building dependency graph...")
+        
         # Add scene/prefab dependencies
         for source, deps in self.scene_dependencies.items():
             G.add_node(source)
@@ -494,6 +539,8 @@ class UnityDependencyAnalyzer:
         # Add script dependencies
         cs_files = list(Path(project_root).rglob("*.cs"))
         all_cs_names = {f.name: str(f) for f in cs_files}
+        
+        st.info(f"Processing {len(cs_files)} C# script files...")
         
         # Initialize script_dependencies if not already done
         if not hasattr(self, 'script_dependencies'):
@@ -525,6 +572,7 @@ class UnityDependencyAnalyzer:
                     
                     G.add_edge(rel_path, dep_path, type="script_uses")
         
+        st.success(f"Dependency graph built with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
         return G, node_types
     
     def generate_mermaid_diagram(self, subgraph: nx.DiGraph, title: str = "") -> str:
@@ -858,26 +906,40 @@ if uploaded_file is not None or project_url:
                 if upload_method == "Essential Files Only" and len(analyzer.guid_index) < 100:
                     st.warning("⚠️ Limited assets detected. This is normal for essential-only uploads.")
                 
-                st.success(f"✅ Project analyzed successfully!")
+                # Final results with better feedback
+                scenes_found = len([k for k in analyzer.scene_dependencies.keys() if k.endswith('.unity')])
+                prefabs_found = len([k for k in analyzer.scene_dependencies.keys() if k.endswith('.prefab')])
                 
-                # Enhanced statistics
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown(f"**Analysis Results:**")
-                    st.markdown(f"- 📄 {len(analyzer.guid_index)} assets with GUIDs")
-                    st.markdown(f"- 🎬 {len([k for k in analyzer.scene_dependencies.keys() if k.endswith('.unity')])} scenes")
-                    st.markdown(f"- 🧩 {len([k for k in analyzer.scene_dependencies.keys() if k.endswith('.prefab')])} prefabs")
-                with col2:
-                    st.markdown(f"**Dependency Graph:**")
-                    st.markdown(f"- 🔗 {analyzer.dependency_graph.number_of_nodes()} total nodes")
-                    st.markdown(f"- ➡️ {analyzer.dependency_graph.number_of_edges()} relationships")
-                    st.markdown(f"- 📊 Method: {upload_method}")
-                
-                # Analysis quality indicator
-                if upload_method == "Essential Files Only":
-                    st.info("🎯 **Analysis Quality**: Focused on code structure (recommended for large projects)")
+                if scenes_found > 0 or prefabs_found > 0:
+                    st.success(f"✅ Project analyzed successfully!")
+                    
+                    # Enhanced statistics
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown(f"**Analysis Results:**")
+                        st.markdown(f"- 📄 {len(analyzer.guid_index)} assets with GUIDs")
+                        st.markdown(f"- 🎬 {scenes_found} scenes")
+                        st.markdown(f"- 🧩 {prefabs_found} prefabs")
+                    with col2:
+                        st.markdown(f"**Dependency Graph:**")
+                        st.markdown(f"- 🔗 {analyzer.dependency_graph.number_of_nodes()} total nodes")
+                        st.markdown(f"- ➡️ {analyzer.dependency_graph.number_of_edges()} relationships")
+                        st.markdown(f"- 📊 Method: {upload_method}")
+                    
+                    # Analysis quality indicator
+                    if upload_method == "Essential Files Only":
+                        st.info("🎯 **Analysis Quality**: Focused on code structure (recommended for large projects)")
+                    else:
+                        st.info("🔍 **Analysis Quality**: Complete project analysis")
                 else:
-                    st.info("🔍 **Analysis Quality**: Complete project analysis")
+                    st.error("❌ No scenes or prefabs found!")
+                    st.info("""
+                    **Troubleshooting Tips:**
+                    1. Make sure your ZIP contains Unity scene files (.unity extension)
+                    2. Check that the Assets folder is included in your ZIP
+                    3. Verify the project structure is correct
+                    4. Try uploading a different Unity project for testing
+                    """)
                     
             else:
                 st.error("Failed to extract project. Please ensure you uploaded a valid Unity project ZIP file.")
@@ -920,6 +982,12 @@ if st.session_state.analyzer.dependency_graph is not None:
     
     if scenes:
         st.header("📋 Scene Analysis")
+        
+        # Show found scenes for debugging
+        with st.expander("🔍 Debug: Found Scenes"):
+            st.write("Scene files detected:")
+            for scene in scenes:
+                st.text(f"  - {scene}")
         
         # Scene selection
         selected_scenes = st.multiselect(
@@ -1313,6 +1381,52 @@ if st.session_state.analyzer.dependency_graph is not None:
                         st.warning(f"Scene {scene} not found in dependency graph.")
     else:
         st.info("No scenes found in the uploaded project. Please ensure you uploaded a complete Unity project with scene files.")
+        
+        # Enhanced troubleshooting
+        st.markdown("### 🔧 Troubleshooting")
+        st.error("""
+        **Scene files not found!** This usually happens when:
+        
+        1. **Wrong ZIP Contents**: Make sure your ZIP contains Unity scene files with .unity extension
+        2. **Missing Assets Folder**: The ZIP should include the 'Assets' directory structure
+        3. **File Extensions**: Scene files must have the .unity extension
+        4. **Upload Method**: Try different upload methods if one doesn't work
+        
+        **Expected ZIP Structure:**
+        ```
+        YourUnityProject.zip
+        ├── Assets/
+        │   ├── Scenes/
+        │   │   ├── MainMenu.unity
+        │   │   └── GameLevel.unity
+        │   └── Scripts/
+        └── ProjectSettings/ (optional)
+        ```
+        
+        **Quick Fixes:**
+        - ✅ Verify your ZIP contains .unity files
+        - ✅ Try the 'Essential Files Only' upload method
+        - ✅ Check that scene files aren't in a nested subfolder
+        - ✅ Ensure the ZIP extraction was successful
+        """)
+        
+        # Add a reanalysis option
+        if st.button("🔄 Re-analyze Current Project"):
+            if st.session_state.analyzer.project_root:
+                with st.spinner("Re-analyzing project..."):
+                    analyzer = st.session_state.analyzer
+                    
+                    # Re-run the analysis steps
+                    st.info("Re-scanning for scenes and prefabs...")
+                    analyzer.scene_dependencies = analyzer.scan_scenes_and_prefabs(analyzer.project_root)
+                    
+                    st.info("Rebuilding dependency graph...")
+                    analyzer.dependency_graph, analyzer.node_types = analyzer.build_dependency_graph(analyzer.project_root)
+                    
+                    st.success("Re-analysis complete! Check above for results.")
+                    st.experimental_rerun()
+            else:
+                st.warning("No project loaded. Please upload a project first.")
 else:
     st.info("👆 Please upload a Unity project ZIP file and analyze it to begin dependency analysis.")
     

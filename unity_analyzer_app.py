@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit_mermaid as stmd
 import os
 import json
 import yaml
@@ -30,27 +29,6 @@ class UnityDependencyAnalyzer:
         self.dependency_graph = None
         self.node_types = {}
     
-    def extract_project_from_zip(self, uploaded_file) -> str:
-        """Extract uploaded ZIP file to temporary directory"""
-        temp_dir = tempfile.mkdtemp()
-        
-        try:
-            with zipfile.ZipFile(uploaded_file, 'r') as zip_ref:
-                # Extract all files
-                zip_ref.extractall(temp_dir)
-                
-                # Find the actual project root (look for Assets folder)
-                for root, dirs, files in os.walk(temp_dir):
-                    if 'Assets' in dirs:
-                        return root
-                
-                # If no Assets folder found, return temp_dir
-                return temp_dir
-                
-        except Exception as e:
-            st.error(f"Error extracting ZIP file: {str(e)}")
-            return None
-    
     def build_guid_index(self, project_root: str) -> Dict[str, str]:
         """Build GUID to asset path mapping from .meta files"""
         guid_map = {}
@@ -62,8 +40,10 @@ class UnityDependencyAnalyzer:
             meta_files = list(Path(project_root).rglob("*.meta"))
             total_files = len(meta_files)
             
+            st.info(f"Found {total_files} .meta files to process")
+            
             if total_files == 0:
-                st.warning("No .meta files found. Make sure you uploaded a complete Unity project.")
+                st.warning("No .meta files found. Make sure you're pointing to the correct Unity project root directory.")
                 return guid_map
             
             for idx, meta_path in enumerate(meta_files):
@@ -103,13 +83,14 @@ class UnityDependencyAnalyzer:
                 progress = (idx + 1) / total_files
                 progress_bar.progress(progress)
                 status_text.text(f"Processing meta files: {idx + 1}/{total_files}")
-            
+                
         except Exception as e:
-            st.error(f"Error scanning meta files: {str(e)}")
+            st.error(f"Error scanning for .meta files: {str(e)}")
         finally:
             progress_bar.empty()
             status_text.empty()
         
+        st.success(f"Built GUID index with {len(guid_map)} entries")
         return guid_map
     
     def extract_guid_references(self, filepath: str) -> Set[str]:
@@ -122,8 +103,8 @@ class UnityDependencyAnalyzer:
                 matches = re.findall(r"guid:\s*([0-9a-f]{32})", text)
                 guids.update(matches)
         except Exception as e:
-            # Silently skip problematic files
-            pass
+            # Log error but don't stop processing
+            st.warning(f"Error reading {filepath}: {str(e)}")
         
         return guids
     
@@ -131,44 +112,84 @@ class UnityDependencyAnalyzer:
         """Scan scenes and prefabs for dependencies"""
         dependencies = {}
         
-        # Find all scene and prefab files
-        unity_files = list(Path(project_root).rglob("*.unity"))
-        prefab_files = list(Path(project_root).rglob("*.prefab"))
-        all_files = unity_files + prefab_files
-        
-        if not all_files:
-            st.warning("No Unity scene or prefab files found.")
-            return dependencies
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
         try:
+            # Find all scene and prefab files with detailed logging
+            st.info("Searching for Unity scene and prefab files...")
+            
+            unity_files = list(Path(project_root).rglob("*.unity"))
+            prefab_files = list(Path(project_root).rglob("*.prefab"))
+            
+            st.info(f"Found {len(unity_files)} scene files (.unity)")
+            st.info(f"Found {len(prefab_files)} prefab files (.prefab)")
+            
+            # Debug: Show some example files found
+            if unity_files:
+                st.success(f"Example scene files found:")
+                for scene in unity_files[:3]:  # Show first 3
+                    rel_path = os.path.relpath(scene, project_root)
+                    st.text(f"  - {rel_path}")
+                if len(unity_files) > 3:
+                    st.text(f"  ... and {len(unity_files) - 3} more")
+            else:
+                st.warning("❌ No scene files (.unity) found!")
+                st.info("Make sure you're pointing to the Unity project root directory that contains the Assets folder.")
+            
+            if prefab_files:
+                st.success(f"Example prefab files found:")
+                for prefab in prefab_files[:3]:  # Show first 3
+                    rel_path = os.path.relpath(prefab, project_root)
+                    st.text(f"  - {rel_path}")
+                if len(prefab_files) > 3:
+                    st.text(f"  ... and {len(prefab_files) - 3} more")
+            
+            all_files = unity_files + prefab_files
+            
+            if not all_files:
+                st.error("No Unity scene or prefab files found in the specified directory!")
+                st.info("""
+                **Troubleshooting:**
+                1. Make sure you're pointing to the Unity project root directory
+                2. The directory should contain an 'Assets' folder
+                3. Scene files should have .unity extension
+                4. Check if the directory path is correct
+                """)
+                return dependencies
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
             for idx, file_path in enumerate(all_files):
-                rel_path = os.path.relpath(file_path, project_root).replace("\\", "/")
-                guids = self.extract_guid_references(str(file_path))
-                
-                # Convert GUIDs to asset paths
-                asset_paths = set()
-                for guid in guids:
-                    if guid in self.guid_index:
-                        asset_paths.add(self.guid_index[guid])
-                    else:
-                        asset_paths.add(f"<UNKNOWN GUID {guid}>")
-                
-                dependencies[rel_path] = asset_paths
-                
-                # Update progress
-                progress = (idx + 1) / len(all_files)
-                progress_bar.progress(progress)
-                status_text.text(f"Scanning Unity files: {idx + 1}/{len(all_files)}")
-        
-        except Exception as e:
-            st.error(f"Error scanning Unity files: {str(e)}")
-        finally:
+                try:
+                    rel_path = os.path.relpath(file_path, project_root).replace("\\", "/")
+                    guids = self.extract_guid_references(str(file_path))
+                    
+                    # Convert GUIDs to asset paths
+                    asset_paths = set()
+                    for guid in guids:
+                        if guid in self.guid_index:
+                            asset_paths.add(self.guid_index[guid])
+                        else:
+                            asset_paths.add(f"<UNKNOWN GUID {guid}>")
+                    
+                    dependencies[rel_path] = asset_paths
+                    
+                    # Update progress
+                    progress = (idx + 1) / len(all_files)
+                    progress_bar.progress(progress)
+                    status_text.text(f"Scanning Unity files: {idx + 1}/{len(all_files)} - {os.path.basename(file_path)}")
+                    
+                except Exception as e:
+                    st.warning(f"Error processing {file_path}: {str(e)}")
+                    continue
+            
             progress_bar.empty()
             status_text.empty()
+            
+        except Exception as e:
+            st.error(f"Error during scene/prefab scanning: {str(e)}")
+            return {}
         
+        st.success(f"Successfully scanned {len(dependencies)} Unity files")
         return dependencies
     
     def extract_script_dependencies(self, cs_filepath: str) -> Set[str]:
@@ -198,8 +219,7 @@ class UnityDependencyAnalyzer:
                             deps.add(match + ".cs")
                             
         except Exception as e:
-            # Silently skip problematic files
-            pass
+            st.warning(f"Error processing script {cs_filepath}: {str(e)}")
         
         return deps
     
@@ -207,6 +227,8 @@ class UnityDependencyAnalyzer:
         """Build the complete dependency graph"""
         G = nx.DiGraph()
         node_types = {}
+        
+        st.info("Building dependency graph...")
         
         # Add scene/prefab dependencies
         for source, deps in self.scene_dependencies.items():
@@ -234,6 +256,8 @@ class UnityDependencyAnalyzer:
         cs_files = list(Path(project_root).rglob("*.cs"))
         all_cs_names = {f.name: str(f) for f in cs_files}
         
+        st.info(f"Processing {len(cs_files)} C# script files...")
+        
         for cs_file in cs_files:
             rel_path = os.path.relpath(cs_file, project_root).replace("\\", "/")
             deps = self.extract_script_dependencies(str(cs_file))
@@ -257,6 +281,7 @@ class UnityDependencyAnalyzer:
                     
                     G.add_edge(rel_path, dep_path, type="script_uses")
         
+        st.success(f"Dependency graph built with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
         return G, node_types
     
     def generate_mermaid_diagram(self, subgraph: nx.DiGraph, title: str = "") -> str:
@@ -326,82 +351,64 @@ st.markdown("Analyze Unity project dependencies, generate dependency graphs, and
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    # File upload instead of directory input
-    st.markdown("### 📁 Upload Unity Project")
-    uploaded_file = st.file_uploader(
-        "Upload Unity Project (ZIP)",
-        type=['zip'],
-        help="Upload a ZIP file containing your Unity project. Make sure to include the Assets folder and .meta files."
+    # Project directory input
+    project_path = st.text_input(
+        "Unity Project Directory",
+        placeholder="C:/Projects/MyUnityProject",
+        help="Enter the full path to your Unity project root directory (should contain Assets folder)"
     )
     
-    if uploaded_file is not None:
-        st.success(f"✅ Uploaded: {uploaded_file.name}")
-        st.info("💡 **Tip**: Make sure your ZIP includes the Assets folder and all .meta files for accurate analysis.")
-        
-        if st.button("🔍 Analyze Project", type="primary"):
-            with st.spinner("Extracting and analyzing Unity project..."):
-                analyzer = st.session_state.analyzer
-                
-                # Extract ZIP file
-                st.info("Extracting project files...")
-                project_root = analyzer.extract_project_from_zip(uploaded_file)
-                
-                if project_root:
-                    analyzer.project_root = project_root
-                    
-                    # Step 1: Build GUID index
-                    st.info("Building GUID index from .meta files...")
-                    analyzer.guid_index = analyzer.build_guid_index(project_root)
-                    
-                    # Step 2: Scan scenes and prefabs
-                    st.info("Scanning scenes and prefabs...")
-                    analyzer.scene_dependencies = analyzer.scan_scenes_and_prefabs(project_root)
-                    
-                    # Step 3: Build dependency graph
-                    st.info("Building dependency graph...")
-                    analyzer.dependency_graph, analyzer.node_types = analyzer.build_dependency_graph(project_root)
-                    
-                    st.success(f"✅ Project analyzed successfully!")
-                    st.markdown(f"**Found:**")
-                    st.markdown(f"- {len(analyzer.guid_index)} assets with GUIDs")
-                    st.markdown(f"- {len([k for k in analyzer.scene_dependencies.keys() if k.endswith('.unity')])} scenes")
-                    st.markdown(f"- {len([k for k in analyzer.scene_dependencies.keys() if k.endswith('.prefab')])} prefabs")
-                    st.markdown(f"- {analyzer.dependency_graph.number_of_nodes()} total nodes in dependency graph")
-                    st.markdown(f"- {analyzer.dependency_graph.number_of_edges()} dependency relationships")
-                else:
-                    st.error("Failed to extract project. Please ensure you uploaded a valid Unity project ZIP file.")
+    # Add directory validation helper
+    if project_path:
+        if os.path.exists(project_path):
+            if os.path.exists(os.path.join(project_path, "Assets")):
+                st.success("✅ Valid Unity project directory detected")
+            else:
+                st.warning("⚠️ Directory exists but no 'Assets' folder found. Make sure this is the Unity project root.")
+        else:
+            st.error("❌ Directory does not exist")
     
-    else:
-        st.info("👆 Please upload a Unity project ZIP file to begin analysis.")
-
-# Instructions for creating ZIP file
-with st.sidebar:
-    with st.expander("📦 How to Create Project ZIP"):
-        st.markdown("""
-        ### Creating a Unity Project ZIP:
-        
-        1. **Include Essential Folders:**
-           - `Assets/` (required)
-           - `ProjectSettings/` (recommended)
-           - `Packages/` (if using custom packages)
-        
-        2. **Include .meta Files:**
-           - Make sure to include all `.meta` files
-           - These contain the GUIDs needed for dependency resolution
-        
-        3. **What to Exclude:**
-           - `Library/` folder (large, auto-generated)
-           - `Temp/` folder
-           - `obj/` and `bin/` folders
-           - `.git/` if using version control
-        
-        4. **ZIP the Project:**
-           - Select your project folder contents
-           - Create a ZIP archive
-           - Upload here for analysis
-        
-        **💡 Pro Tip:** Use Unity's built-in Package Manager export or create the ZIP from your project's root directory.
-        """)
+    if st.button("🔍 Scan Project", type="primary"):
+        if project_path and os.path.exists(project_path):
+            with st.spinner("Scanning Unity project..."):
+                analyzer = st.session_state.analyzer
+                analyzer.project_root = project_path
+                
+                # Step 1: Build GUID index
+                st.info("Step 1: Building GUID index from .meta files...")
+                analyzer.guid_index = analyzer.build_guid_index(project_path)
+                
+                # Step 2: Scan scenes and prefabs
+                st.info("Step 2: Scanning scenes and prefabs...")
+                analyzer.scene_dependencies = analyzer.scan_scenes_and_prefabs(project_path)
+                
+                # Step 3: Build dependency graph
+                st.info("Step 3: Building dependency graph...")
+                analyzer.dependency_graph, analyzer.node_types = analyzer.build_dependency_graph(project_path)
+                
+                # Final results
+                scenes_found = len([k for k in analyzer.scene_dependencies.keys() if k.endswith('.unity')])
+                prefabs_found = len([k for k in analyzer.scene_dependencies.keys() if k.endswith('.prefab')])
+                
+                if scenes_found > 0 or prefabs_found > 0:
+                    st.success(f"✅ Project scanned successfully!")
+                    st.markdown(f"**Analysis Results:**")
+                    st.markdown(f"- 📄 {len(analyzer.guid_index)} assets with GUIDs")
+                    st.markdown(f"- 🎬 {scenes_found} scenes")
+                    st.markdown(f"- 🧩 {prefabs_found} prefabs")
+                    st.markdown(f"- 🔗 {analyzer.dependency_graph.number_of_nodes()} total nodes in dependency graph")
+                    st.markdown(f"- ➡️ {analyzer.dependency_graph.number_of_edges()} dependency relationships")
+                else:
+                    st.error("❌ No scenes or prefabs found!")
+                    st.info("""
+                    **Troubleshooting Tips:**
+                    1. Make sure the path points to your Unity project root directory
+                    2. The directory should contain an 'Assets' folder with your scenes
+                    3. Scene files should have the .unity extension
+                    4. Try using forward slashes (/) in the path instead of backslashes
+                    """)
+        else:
+            st.error("Please enter a valid Unity project directory path.")
 
 # Main content area
 if st.session_state.analyzer.dependency_graph is not None:
@@ -412,6 +419,12 @@ if st.session_state.analyzer.dependency_graph is not None:
     
     if scenes:
         st.header("📋 Scene Analysis")
+        
+        # Show found scenes for debugging
+        with st.expander("🔍 Debug: Found Scenes"):
+            st.write("Scene files detected:")
+            for scene in scenes:
+                st.text(f"  - {scene}")
         
         # Scene selection
         selected_scenes = st.multiselect(
@@ -480,105 +493,17 @@ if st.session_state.analyzer.dependency_graph is not None:
                             with col4:
                                 st.metric("Dependencies", scene_subgraph.number_of_edges())
                         
-                        # Additional analysis options
-                        with st.expander("🔧 Advanced Analysis Options"):
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                show_orphaned = st.checkbox("Show orphaned assets", value=False)
-                                show_circular = st.checkbox("Detect circular dependencies", value=False)
-                            with col2:
-                                filter_by_type = st.selectbox(
-                                    "Filter by asset type:",
-                                    ["All", "Scripts only", "Prefabs only", "Assets only"]
-                                )
-                        
-                        # Circular dependency detection
-                        if show_circular:
-                            try:
-                                cycles = list(nx.simple_cycles(scene_subgraph))
-                                if cycles:
-                                    st.warning(f"⚠️ Found {len(cycles)} circular dependencies:")
-                                    for i, cycle in enumerate(cycles[:5]):  # Show first 5
-                                        cycle_str = " → ".join([os.path.basename(node) for node in cycle])
-                                        st.text(f"{i+1}. {cycle_str}")
-                                    if len(cycles) > 5:
-                                        st.text(f"... and {len(cycles) - 5} more")
-                                else:
-                                    st.success("✅ No circular dependencies found")
-                            except Exception as e:
-                                st.error(f"Error detecting cycles: {str(e)}")
-                        
-                        # Orphaned assets detection
-                        if show_orphaned:
-                            all_referenced = set()
-                            for deps in analyzer.scene_dependencies.values():
-                                all_referenced.update(deps)
-                            
-                            all_assets = set(analyzer.scene_dependencies.keys())
-                            orphaned = all_assets - all_referenced
-                            orphaned = {asset for asset in orphaned if not asset.endswith('.unity')}
-                            
-                            if orphaned:
-                                st.warning(f"⚠️ Found {len(orphaned)} potentially orphaned assets:")
-                                for asset in list(orphaned)[:10]:  # Show first 10
-                                    st.text(f"• {os.path.basename(asset)}")
-                                if len(orphaned) > 10:
-                                    st.text(f"... and {len(orphaned) - 10} more")
-                            else:
-                                st.success("✅ No orphaned assets found")
-                        
                         # Generate Mermaid diagram
                         mermaid_diagram = analyzer.generate_mermaid_diagram(
                             scene_subgraph, 
                             f"Dependencies for {os.path.basename(scene)}"
                         )
                         
-                        # Display diagram with user-configurable height
+                        # Display diagram
                         st.markdown("### 📊 Dependency Diagram")
-                        
-                        # Add diagram size controls
-                        col1, col2, col3 = st.columns([2, 1, 1])
-                        with col1:
-                            diagram_height = st.slider(
-                                "Diagram Height (pixels)", 
-                                min_value=400, 
-                                max_value=1200, 
-                                value=800,
-                                step=50,
-                                help="Adjust the height of the dependency diagram for better visibility"
-                            )
-                        with col2:
-                            fullscreen_mode = st.checkbox("Fullscreen Mode", value=False, help="Use maximum width for the diagram")
-                        with col3:
-                            zoom_level = st.selectbox("Zoom Level", ["Small", "Medium", "Large"], index=1)
-                        
-                        # Apply zoom level to height
-                        zoom_multipliers = {"Small": 0.8, "Medium": 1.0, "Large": 1.3}
-                        adjusted_height = int(diagram_height * zoom_multipliers[zoom_level])
-                        
-                        try:
-                            # Use container width based on fullscreen mode
-                            if fullscreen_mode:
-                                stmd.st_mermaid(mermaid_diagram, height=adjusted_height, width="100%")
-                            else:
-                                stmd.st_mermaid(mermaid_diagram, height=adjusted_height)
-                                
-                            # Add tips for better diagram viewing
-                            with st.expander("💡 Diagram Viewing Tips"):
-                                st.markdown("""
-                                **For Better Visibility:**
-                                - **Increase Height**: Use the slider above to make the diagram taller
-                                - **Fullscreen Mode**: Enable for wider diagrams with many nodes
-                                - **Zoom Level**: Choose 'Large' for complex diagrams with many dependencies
-                                - **Browser Zoom**: Use Ctrl+/Cmd+ to zoom in your browser
-                                - **Download**: Save the Mermaid file to view in external tools like Mermaid Live Editor
-                                """)
-                                
-                        except Exception as e:
-                            st.warning(f"Could not render interactive diagram: {str(e)}")
-                            st.markdown("**Mermaid Code (copy to external viewer if needed):**")
-                            st.code(mermaid_diagram, language="mermaid")
-                            st.info("💡 **Tip**: Copy the code above and paste it into [Mermaid Live Editor](https://mermaid.live/) for interactive viewing.")
+                        st.markdown("```mermaid")
+                        st.markdown(mermaid_diagram)
+                        st.markdown("```")
                         
                         # Download options
                         col1, col2 = st.columns(2)
@@ -603,36 +528,6 @@ if st.session_state.analyzer.dependency_graph is not None:
                                     "Target Path": target
                                 })
                             
-                            # Performance insights
-                            if dependencies_data:
-                                st.markdown("### 🎯 Performance Insights")
-                                
-                                # Most referenced assets
-                                target_counts = {}
-                                for dep in dependencies_data:
-                                    target = dep["Target"]
-                                    target_counts[target] = target_counts.get(target, 0) + 1
-                                
-                                top_referenced = sorted(target_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-                                
-                                col1, col2 = st.columns(2)
-                                with col1:
-                                    st.markdown("**Most Referenced Assets:**")
-                                    for asset, count in top_referenced:
-                                        st.text(f"• {asset} ({count} references)")
-                                
-                                with col2:
-                                    # Dependency complexity score
-                                    script_complexity = len([d for d in dependencies_data if d["Source Type"] == "script"])
-                                    total_deps = len(dependencies_data)
-                                    complexity_score = min(100, (script_complexity / max(total_deps, 1)) * 100)
-                                    
-                                    st.metric(
-                                        "Script Coupling Score", 
-                                        f"{complexity_score:.1f}%",
-                                        help="Lower is better. High coupling may indicate refactoring opportunities."
-                                    )
-                            
                             if dependencies_data:
                                 df = pd.DataFrame(dependencies_data)
                                 csv = df.to_csv(index=False)
@@ -655,22 +550,46 @@ if st.session_state.analyzer.dependency_graph is not None:
                     else:
                         st.warning(f"Scene {scene} not found in dependency graph.")
     else:
-        st.info("No scenes found in the uploaded project. Please ensure you uploaded a complete Unity project with scene files.")
+        st.info("No scenes found in the project. Please scan a valid Unity project.")
+        
+        # Enhanced troubleshooting
+        st.markdown("### 🔧 Troubleshooting")
+        st.error("""
+        **Scene files not found!** This usually happens when:
+        
+        1. **Wrong Directory**: Make sure you're pointing to the Unity project root (the folder that contains the 'Assets' directory)
+        2. **Path Format**: Try using forward slashes (/) instead of backslashes (\\)
+        3. **File Extensions**: Scene files must have the .unity extension
+        4. **Permissions**: Make sure the directory is readable
+        
+        **Expected Structure:**
+        ```
+        YourUnityProject/
+        ├── Assets/
+        │   ├── Scenes/
+        │   │   ├── MainMenu.unity
+        │   │   └── GameLevel.unity
+        │   └── Scripts/
+        └── ProjectSettings/
+        ```
+        """)
+        
 else:
-    st.info("👆 Please upload a Unity project ZIP file and analyze it to begin dependency analysis.")
+    st.info("👆 Please select a Unity project directory and scan it to begin analysis.")
     
     # Example usage section
     with st.expander("📖 How to Use"):
         st.markdown("""
         ### Steps to Analyze Your Unity Project:
         
-        1. **Prepare Project**: Create a ZIP file of your Unity project (see sidebar for instructions)
-        2. **Upload Project**: Use the file uploader to upload your Unity project ZIP
-        3. **Analyze Project**: Click "Analyze Project" to scan all files and build dependency graph
-        4. **Select Scenes**: Choose which scenes you want to analyze from the dropdown
-        5. **Configure Options**: Adjust analysis settings like dependency depth and included types
-        6. **Generate Analysis**: Click "Analyze Selected Scenes" to generate dependency graphs
-        7. **Download Results**: Save Mermaid diagrams and CSV dependency tables
+        1. **Set Project Path**: Enter the full path to your Unity project root directory in the sidebar
+        2. **Verify Path**: Make sure the path points to the folder containing the 'Assets' directory
+        3. **Scan Project**: Click the "Scan Project" button to analyze all files
+        4. **Check Results**: Verify that scenes and prefabs were found
+        5. **Select Scenes**: Choose which scenes you want to analyze from the dropdown
+        6. **Configure Options**: Adjust analysis settings like dependency depth and included types
+        7. **Generate Analysis**: Click "Analyze Selected Scenes" to generate dependency graphs
+        8. **Download Results**: Save Mermaid diagrams and CSV dependency tables
         
         ### What This Tool Analyzes:
         
@@ -686,14 +605,13 @@ else:
         - `.cs` C# script files
         - `.meta` metadata files for GUID resolution
         
-        ### Cloud Deployment Benefits:
+        ### Common Issues:
         
-        - **No Local Installation**: Access from any device with a web browser
-        - **Secure Processing**: Files are processed temporarily and not stored
-        - **Cross-Platform**: Works on Windows, Mac, and Linux
-        - **Team Sharing**: Share analysis results with your development team
+        - **No scenes found**: Make sure you're pointing to the Unity project root directory
+        - **Path errors**: Use forward slashes (/) or double backslashes (\\\\)
+        - **Missing Assets folder**: The directory should contain an 'Assets' folder
         """)
 
 # Footer
 st.markdown("---")
-st.markdown("**Unity Dependency Analyzer** - Built for Unity developers to understand project structure and dependencies. Now cloud-ready! 🚀")
+st.markdown("**Unity Dependency Analyzer** - Built for Unity developers to understand project structure and dependencies.")
