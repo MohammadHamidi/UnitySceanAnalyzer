@@ -1,6 +1,15 @@
 streamlit>=1.28.0
 streamlit-mermaid>=0.3.0
+# Data processing and analysis
+pandas>=1.5.0
 networkx>=3.0
-pyyaml>=6.0
-pandas>=2.0.0
-pathlib2>=2.3.7
+PyYAML>=6.0
+
+# API requests for AI enhancement and URL downloads
+requests>=2.31.0
+
+# Optional: For better error handling and retries
+urllib3>=1.26.0
+
+# Optional: For enhanced JSON processing
+simplejson>=3.19.0
