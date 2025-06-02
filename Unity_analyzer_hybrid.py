@@ -14,6 +14,7 @@ import base64
 from io import StringIO
 import requests
 import time
+import random
 
 # Set page configuration
 st.set_page_config(
@@ -577,6 +578,10 @@ class UnityDependencyAnalyzer:
     
     def generate_mermaid_diagram(self, subgraph: nx.DiGraph, title: str = "") -> str:
         """Generate Mermaid diagram from NetworkX graph"""
+        # Check if diagram is too complex
+        if len(subgraph.nodes()) > 50:
+            return self.generate_simplified_mermaid_diagram(subgraph, title, show_full_labels=False)
+        
         lines = ["graph TD"]
         if title:
             lines.insert(0, f"---\ntitle: {title}\n---")
@@ -586,6 +591,9 @@ class UnityDependencyAnalyzer:
         for node in subgraph.nodes():
             sanitized = re.sub(r'[^\w]', '_', node)
             label = os.path.basename(node)
+            # Truncate very long labels
+            if len(label) > 20:
+                label = label[:17] + "..."
             node_map[node] = (sanitized, label)
         
         # Add edges
@@ -629,10 +637,87 @@ class UnityDependencyAnalyzer:
         ])
         
         return "\n".join(lines)
+    
+    def generate_simplified_mermaid_diagram(self, subgraph: nx.DiGraph, title: str = "", 
+                                          show_full_labels: bool = False, layout_style: str = "Compact") -> str:
+        """Generate simplified Mermaid diagram for large graphs"""
+        lines = ["graph TD"]
+        if title:
+            lines.insert(0, f"---\ntitle: {title}\n---")
+        
+        # Create sanitized node IDs and labels with more aggressive truncation
+        node_map = {}
+        for node in subgraph.nodes():
+            sanitized = re.sub(r'[^\w]', '_', node)
+            label = os.path.basename(node)
+            
+            # More aggressive label truncation for large diagrams
+            if show_full_labels:
+                max_len = 15
+            else:
+                max_len = 8
+                
+            if len(label) > max_len:
+                label = label[:max_len-2] + ".."
+            
+            node_map[node] = (sanitized, label)
+        
+        # Group nodes by type for better organization
+        nodes_by_type = {'scene': [], 'prefab': [], 'script': [], 'asset': []}
+        for node in subgraph.nodes():
+            node_type = self.node_types.get(node, 'asset')
+            nodes_by_type[node_type].append(node)
+        
+        # Add nodes grouped by type
+        for node_type, nodes in nodes_by_type.items():
+            if nodes:
+                for node in nodes:
+                    sanitized, label = node_map[node]
+                    lines.append(f'    {sanitized}["{label}"]:::{node_type}')
+        
+        # Add edges with reduced complexity
+        edge_count = 0
+        max_edges = 100  # Limit edges for performance
+        
+        for source, target in subgraph.edges():
+            if edge_count >= max_edges:
+                break
+                
+            source_id, _ = node_map[source]
+            target_id, _ = node_map[target]
+            lines.append(f'    {source_id} --> {target_id}')
+            edge_count += 1
+        
+        if len(subgraph.edges()) > max_edges:
+            lines.append(f'    note["... and {len(subgraph.edges()) - max_edges} more connections"]')
+        
+        # Add styling
+        lines.extend([
+            "",
+            "    classDef scene fill:#e1f5fe,stroke:#01579b,stroke-width:1px,color:#000",
+            "    classDef prefab fill:#f3e5f5,stroke:#4a148c,stroke-width:1px,color:#000", 
+            "    classDef script fill:#e8f5e8,stroke:#1b5e20,stroke-width:1px,color:#000",
+            "    classDef asset fill:#fff3e0,stroke:#e65100,stroke-width:1px,color:#000"
+        ])
+        
+        return "\n".join(lines)
 
 # Initialize session state
 if 'analyzer' not in st.session_state:
     st.session_state.analyzer = UnityDependencyAnalyzer()
+
+# Initialize other session state variables
+if 'analysis_complete' not in st.session_state:
+    st.session_state.analysis_complete = False
+
+if 'ai_enhanced' not in st.session_state:
+    st.session_state.ai_enhanced = False
+
+if 'avalai_api_key' not in st.session_state:
+    st.session_state.avalai_api_key = ""
+
+if 'upload_method' not in st.session_state:
+    st.session_state.upload_method = "Direct Upload (< 200MB)"
 
 # Main UI
 st.title("🎮 Unity Project Dependency Analyzer")
@@ -642,54 +727,71 @@ st.markdown("Analyze Unity project dependencies, generate dependency graphs, and
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    # AI Enhancement section
-    st.markdown("### 🤖 AI Enhanced Analysis")
-    ai_enhanced = st.checkbox(
-        "Enable AI Enhancement", 
-        value=False,
-        help="Use AvalAI API for advanced analysis including execution flow, bug detection, and corner cases"
-    )
-    
-    avalai_api_key = None
-    if ai_enhanced:
+    # AI Enhancement section - Use form to prevent reruns
+    with st.form("ai_config_form"):
+        st.markdown("### 🤖 AI Enhanced Analysis")
+        ai_enhanced = st.checkbox(
+            "Enable AI Enhancement", 
+            value=st.session_state.ai_enhanced,
+            help="Use AvalAI API for advanced analysis including execution flow, bug detection, and corner cases"
+        )
+        
         avalai_api_key = st.text_input(
             "AvalAI API Key",
+            value=st.session_state.avalai_api_key,
             type="password", 
             placeholder="aa-***********",
             help="Enter your AvalAI API key. Get one from https://avalai.ir"
         )
         
-        if avalai_api_key:
-            st.success("🔑 API key configured")
-            st.info("💡 AI analysis will include: execution flow, bug detection, corner cases, and optimization suggestions")
-        else:
-            st.warning("⚠️ Please enter your AvalAI API key to use AI enhancement")
+        ai_config_submitted = st.form_submit_button("💾 Save AI Settings")
+        
+        if ai_config_submitted:
+            st.session_state.ai_enhanced = ai_enhanced
+            st.session_state.avalai_api_key = avalai_api_key
+            st.success("AI settings saved!")
+    
+    # Show current AI status
+    if st.session_state.ai_enhanced and st.session_state.avalai_api_key:
+        st.success("🔑 AI Enhancement: Enabled")
+    elif st.session_state.ai_enhanced:
+        st.warning("⚠️ AI Enhancement enabled but no API key provided")
     
     st.markdown("---")
     
-    # File upload section
-    st.markdown("### 📁 Upload Unity Project")
+    # File upload section - Use form to prevent reruns
+    with st.form("upload_config_form"):
+        st.markdown("### 📁 Upload Unity Project")
+        
+        # File size warning and options
+        st.warning("⚠️ **File Size Limits**: Streamlit has a 200MB upload limit. For larger projects, use the options below.")
+        
+        upload_method = st.radio(
+            "Choose upload method:",
+            ["Direct Upload (< 200MB)", "Essential Files Only", "URL Upload (External Storage)"],
+            index=["Direct Upload (< 200MB)", "Essential Files Only", "URL Upload (External Storage)"].index(st.session_state.upload_method),
+            help="Select the best method based on your project size"
+        )
+        
+        upload_config_submitted = st.form_submit_button("📝 Update Upload Method")
+        
+        if upload_config_submitted:
+            st.session_state.upload_method = upload_method
+            st.success("Upload method updated!")
     
-    # File size warning and options
-    st.warning("⚠️ **File Size Limits**: Streamlit has a 200MB upload limit. For larger projects, use the options below.")
-    
-    upload_method = st.radio(
-        "Choose upload method:",
-        ["Direct Upload (< 200MB)", "Essential Files Only", "URL Upload (External Storage)"],
-        help="Select the best method based on your project size"
-    )
-    
+    # File upload section based on selected method
     uploaded_file = None
     project_url = None
     
-    if upload_method == "Direct Upload (< 200MB)":
+    if st.session_state.upload_method == "Direct Upload (< 200MB)":
         uploaded_file = st.file_uploader(
             "Upload Unity Project (ZIP)",
             type=['zip'],
-            help="Upload a complete Unity project ZIP file under 200MB"
+            help="Upload a complete Unity project ZIP file under 200MB",
+            key="direct_upload"
         )
         
-    elif upload_method == "Essential Files Only":
+    elif st.session_state.upload_method == "Essential Files Only":
         st.info("""
         **📦 Create a lightweight ZIP with only essential files:**
         - `Assets/` folder (scripts, scenes, prefabs only)
@@ -701,7 +803,8 @@ with st.sidebar:
         uploaded_file = st.file_uploader(
             "Upload Essential Files (ZIP)",
             type=['zip'],
-            help="Upload only scripts, scenes, prefabs, and .meta files"
+            help="Upload only scripts, scenes, prefabs, and .meta files",
+            key="essential_upload"
         )
         
         with st.expander("🛠️ How to Create Essential Files ZIP"):
@@ -725,18 +828,27 @@ zip -r essential_project.zip ProjectSettings/
         - Any direct download URL
         """)
         
-        project_url = st.text_input(
-            "Project ZIP URL",
-            placeholder="https://drive.google.com/uc?id=YOUR_FILE_ID",
-            help="Direct download link to your Unity project ZIP"
-        )
-        
-        if project_url:
-            st.success("🔗 URL provided - will download when analyzing")
+        with st.form("url_form"):
+            project_url = st.text_input(
+                "Project ZIP URL",
+                placeholder="https://drive.google.com/uc?id=YOUR_FILE_ID",
+                help="Direct download link to your Unity project ZIP"
+            )
             
-            # Validate URL format
-            if "drive.google.com" in project_url and "uc?id=" not in project_url:
-                st.warning("💡 **Google Drive Tip**: Make sure to use the direct download format: `https://drive.google.com/uc?id=YOUR_FILE_ID`")
+            url_submitted = st.form_submit_button("🔗 Set URL")
+            
+            if url_submitted and project_url:
+                st.session_state.project_url = project_url
+                st.success("🔗 URL saved for analysis")
+                
+                # Validate URL format
+                if "drive.google.com" in project_url and "uc?id=" not in project_url:
+                    st.warning("💡 **Google Drive Tip**: Make sure to use the direct download format: `https://drive.google.com/uc?id=YOUR_FILE_ID`")
+        
+        # Show saved URL if exists
+        if hasattr(st.session_state, 'project_url') and st.session_state.project_url:
+            st.success(f"🔗 Saved URL: {st.session_state.project_url[:50]}...")
+            project_url = st.session_state.project_url
                 
         with st.expander("📋 External Storage Setup Guide"):
             st.markdown("""
@@ -924,13 +1036,18 @@ if uploaded_file is not None or project_url:
                         st.markdown(f"**Dependency Graph:**")
                         st.markdown(f"- 🔗 {analyzer.dependency_graph.number_of_nodes()} total nodes")
                         st.markdown(f"- ➡️ {analyzer.dependency_graph.number_of_edges()} relationships")
-                        st.markdown(f"- 📊 Method: {upload_method}")
+                        st.markdown(f"- 📊 Method: {st.session_state.upload_method}")
                     
                     # Analysis quality indicator
-                    if upload_method == "Essential Files Only":
+                    if st.session_state.upload_method == "Essential Files Only":
                         st.info("🎯 **Analysis Quality**: Focused on code structure (recommended for large projects)")
                     else:
                         st.info("🔍 **Analysis Quality**: Complete project analysis")
+                    
+                    # SET ANALYSIS COMPLETE FLAG - This was missing!
+                    st.session_state.analysis_complete = True
+                    st.success("🎯 **Ready for Scene Analysis!** Scroll down to see the Scene Analysis section.")
+                    
                 else:
                     st.error("❌ No scenes or prefabs found!")
                     st.info("""
@@ -974,7 +1091,7 @@ else:
         """)
 
 # Main content area
-if st.session_state.analyzer.dependency_graph is not None:
+if st.session_state.analyzer.dependency_graph is not None and st.session_state.analysis_complete:
     analyzer = st.session_state.analyzer
     
     # Get available scenes
@@ -989,396 +1106,563 @@ if st.session_state.analyzer.dependency_graph is not None:
             for scene in scenes:
                 st.text(f"  - {scene}")
         
-        # Scene selection
-        selected_scenes = st.multiselect(
-            "Select scenes to analyze:",
-            scenes,
-            default=[],
-            help="Choose one or more scenes to generate dependency analysis"
-        )
-        
-        if selected_scenes:
-            # Analysis options
+        # Scene analysis form to prevent reruns
+        with st.form("scene_analysis_form"):
+            st.markdown("### 🎯 Analysis Configuration")
+            
+            # Add guidance for large projects
+            if len(scenes) > 20:
+                st.info(f"🏗️ **Large Project Detected**: {len(scenes)} scenes found. For better performance, analyze 1-3 scenes at a time.")
+            
+            # Scene selection
+            selected_scenes = st.multiselect(
+                "Select scenes to analyze:",
+                scenes,
+                default=[],
+                help="Choose one or more scenes to generate dependency analysis. For large projects, select fewer scenes for better performance."
+            )
+            
+            # Quick selection helpers for large projects
+            if len(scenes) > 10:
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    show_suggestions = st.checkbox("🎯 Show Scene Suggestions", help="Helpful for large projects")
+                    if show_suggestions:
+                        main_scenes = [s for s in scenes if any(keyword in s.lower() for keyword in ['main', 'menu', 'start', 'level1', 'scene1'])]
+                        if main_scenes:
+                            st.markdown("**🚀 Suggested Main Scenes:**")
+                            for scene in main_scenes[:5]:
+                                st.text(f"• {os.path.basename(scene)}")
+                        else:
+                            st.markdown("**📋 First 5 Scenes:**")
+                            for scene in scenes[:5]:
+                                st.text(f"• {os.path.basename(scene)}")
+                with col2:
+                    if len(selected_scenes) > 5:
+                        st.warning("⚠️ Many scenes selected. Consider analyzing fewer scenes for better performance.")
+                with col3:
+                    use_sample = st.checkbox("🎲 Use Random Sample", help="Analyze 3 random scenes")
+                    if use_sample:
+                        sample_size = st.number_input("Sample size", 1, min(10, len(scenes)), 3)
+                        st.info(f"Will analyze {sample_size} random scenes when submitted")
+            
+            # Analysis options in columns
             col1, col2 = st.columns(2)
             with col1:
                 include_scripts = st.checkbox("Include script dependencies", value=True)
                 include_assets = st.checkbox("Include asset dependencies", value=True)
             with col2:
-                max_depth = st.slider("Maximum dependency depth", 1, 5, 2)
+                max_depth = st.slider("Maximum dependency depth", 1, 5, 1,  # Reduced default for large projects
+                                     help="Lower depth = simpler diagrams for large projects")
                 show_statistics = st.checkbox("Show dependency statistics", value=True)
             
-            if st.button("🔬 Analyze Selected Scenes", type="primary"):
-                for scene in selected_scenes:
-                    st.subheader(f"📄 Analysis for: {os.path.basename(scene)}")
+            # Advanced options
+            with st.expander("🔧 Advanced Analysis Options"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    show_orphaned = st.checkbox("Show orphaned assets", value=False)
+                    show_circular = st.checkbox("Detect circular dependencies", value=False)
+                with col2:
+                    filter_by_type = st.selectbox(
+                        "Filter by asset type:",
+                        ["All", "Scripts only", "Prefabs only", "Assets only"]
+                    )
+            
+            # Submit button for analysis
+            analyze_scenes = st.form_submit_button("🔬 Analyze Selected Scenes", type="primary")
+            
+        # Process analysis outside the form
+        if analyze_scenes and (selected_scenes or (len(scenes) > 10 and 'use_sample' in locals() and use_sample)):
+            # Handle random sampling if enabled
+            final_scenes = selected_scenes
+            if len(scenes) > 10 and 'use_sample' in locals() and use_sample and not selected_scenes:
+                final_scenes = random.sample(scenes, min(sample_size, len(scenes)))
+                st.success(f"🎲 Random sample selected: {[os.path.basename(s) for s in final_scenes]}")
+            elif len(scenes) > 10 and 'use_sample' in locals() and use_sample and selected_scenes:
+                st.info("Using manually selected scenes (random sample ignored)")
+                final_scenes = selected_scenes
+            
+            # Store analysis parameters in session state
+            st.session_state.analysis_params = {
+                'selected_scenes': final_scenes,
+                'include_scripts': include_scripts,
+                'include_assets': include_assets,
+                'max_depth': max_depth,
+                'show_statistics': show_statistics,
+                'show_orphaned': show_orphaned,
+                'show_circular': show_circular,
+                'filter_by_type': filter_by_type
+            }
+            st.session_state.scenes_analyzed = True
+        
+        # Display analysis results if they exist
+        if hasattr(st.session_state, 'scenes_analyzed') and st.session_state.scenes_analyzed:
+            params = st.session_state.analysis_params
+            
+            for scene in params['selected_scenes']:
+                st.subheader(f"📄 Analysis for: {os.path.basename(scene)}")
+                
+                # Get subgraph for this scene
+                if scene in analyzer.dependency_graph:
+                    # Get all descendants up to max_depth
+                    descendants = set()
+                    current_level = {scene}
                     
-                    # Get subgraph for this scene
-                    if scene in analyzer.dependency_graph:
-                        # Get all descendants up to max_depth
-                        descendants = set()
-                        current_level = {scene}
+                    for depth in range(params['max_depth']):
+                        next_level = set()
+                        for node in current_level:
+                            successors = set(analyzer.dependency_graph.successors(node))
+                            next_level.update(successors)
+                            descendants.update(successors)
+                        current_level = next_level
+                        if not current_level:
+                            break
+                    
+                    # Filter by type if requested
+                    nodes_to_include = {scene} | descendants
+                    if not params['include_scripts']:
+                        nodes_to_include = {n for n in nodes_to_include 
+                                          if analyzer.node_types.get(n) != 'script'}
+                    if not params['include_assets']:
+                        nodes_to_include = {n for n in nodes_to_include 
+                                          if analyzer.node_types.get(n) != 'asset'}
+                    
+                    scene_subgraph = analyzer.dependency_graph.subgraph(nodes_to_include).copy()
+                    
+                    # Statistics
+                    if params['show_statistics']:
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            scripts = len([n for n in scene_subgraph.nodes() 
+                                         if analyzer.node_types.get(n) == 'script'])
+                            st.metric("Scripts", scripts)
+                        with col2:
+                            prefabs = len([n for n in scene_subgraph.nodes() 
+                                         if analyzer.node_types.get(n) == 'prefab'])
+                            st.metric("Prefabs", prefabs)
+                        with col3:
+                            assets = len([n for n in scene_subgraph.nodes() 
+                                        if analyzer.node_types.get(n) == 'asset'])
+                            st.metric("Assets", assets)
+                        with col4:
+                            st.metric("Dependencies", scene_subgraph.number_of_edges())
+                    
+                    # Circular dependency detection
+                    if params['show_circular']:
+                        try:
+                            cycles = list(nx.simple_cycles(scene_subgraph))
+                            if cycles:
+                                st.warning(f"⚠️ Found {len(cycles)} circular dependencies:")
+                                for i, cycle in enumerate(cycles[:5]):  # Show first 5
+                                    cycle_str = " → ".join([os.path.basename(node) for node in cycle])
+                                    st.text(f"{i+1}. {cycle_str}")
+                                if len(cycles) > 5:
+                                    st.text(f"... and {len(cycles) - 5} more")
+                            else:
+                                st.success("✅ No circular dependencies found")
+                        except Exception as e:
+                            st.error(f"Error detecting cycles: {str(e)}")
+                    
+                    # Orphaned assets detection
+                    if params['show_orphaned']:
+                        all_referenced = set()
+                        for deps in analyzer.scene_dependencies.values():
+                            all_referenced.update(deps)
                         
-                        for depth in range(max_depth):
-                            next_level = set()
-                            for node in current_level:
-                                successors = set(analyzer.dependency_graph.successors(node))
-                                next_level.update(successors)
-                                descendants.update(successors)
-                            current_level = next_level
-                            if not current_level:
-                                break
+                        all_assets = set(analyzer.scene_dependencies.keys())
+                        orphaned = all_assets - all_referenced
+                        orphaned = {asset for asset in orphaned if not asset.endswith('.unity')}
                         
-                        # Filter by type if requested
-                        nodes_to_include = {scene} | descendants
-                        if not include_scripts:
-                            nodes_to_include = {n for n in nodes_to_include 
-                                              if analyzer.node_types.get(n) != 'script'}
-                        if not include_assets:
-                            nodes_to_include = {n for n in nodes_to_include 
-                                              if analyzer.node_types.get(n) != 'asset'}
+                        if orphaned:
+                            st.warning(f"⚠️ Found {len(orphaned)} potentially orphaned assets:")
+                            for asset in list(orphaned)[:10]:  # Show first 10
+                                st.text(f"• {os.path.basename(asset)}")
+                            if len(orphaned) > 10:
+                                st.text(f"... and {len(orphaned) - 10} more")
+                        else:
+                            st.success("✅ No orphaned assets found")
+                    
+                    # Generate Mermaid diagram with size limits
+                    st.markdown("### 📊 Dependency Diagram")
+                    
+                    # Check diagram complexity
+                    total_nodes = len(scene_subgraph.nodes())
+                    total_edges = len(scene_subgraph.edges())
+                    
+                    if total_nodes > 50:
+                        st.warning(f"⚠️ Large diagram detected: {total_nodes} nodes, {total_edges} edges")
+                        st.info("For better performance, the diagram will be simplified. Use filters below to focus on specific dependencies.")
                         
-                        scene_subgraph = analyzer.dependency_graph.subgraph(nodes_to_include).copy()
-                        
-                        # Statistics
-                        if show_statistics:
-                            col1, col2, col3, col4 = st.columns(4)
-                            with col1:
-                                scripts = len([n for n in scene_subgraph.nodes() 
-                                             if analyzer.node_types.get(n) == 'script'])
-                                st.metric("Scripts", scripts)
-                            with col2:
-                                prefabs = len([n for n in scene_subgraph.nodes() 
-                                             if analyzer.node_types.get(n) == 'prefab'])
-                                st.metric("Prefabs", prefabs)
-                            with col3:
-                                assets = len([n for n in scene_subgraph.nodes() 
-                                            if analyzer.node_types.get(n) == 'asset'])
-                                st.metric("Assets", assets)
-                            with col4:
-                                st.metric("Dependencies", scene_subgraph.number_of_edges())
-                        
-                        # Additional analysis options
-                        with st.expander("🔧 Advanced Analysis Options"):
+                        # Add filtering options for large diagrams
+                        with st.expander("🔧 Diagram Filters (Recommended for Large Projects)"):
                             col1, col2 = st.columns(2)
                             with col1:
-                                show_orphaned = st.checkbox("Show orphaned assets", value=False)
-                                show_circular = st.checkbox("Detect circular dependencies", value=False)
+                                max_nodes = st.slider("Maximum nodes to display", 10, 100, 30, 
+                                                    help="Limit diagram size for better performance")
+                                node_type_filter = st.selectbox("Focus on node type:", 
+                                                               ["All", "Scripts only", "Prefabs only", "Assets only"])
                             with col2:
-                                filter_by_type = st.selectbox(
-                                    "Filter by asset type:",
-                                    ["All", "Scripts only", "Prefabs only", "Assets only"]
-                                )
+                                show_labels = st.checkbox("Show full labels", value=False, 
+                                                        help="Uncheck to show shorter labels")
+                                layout_style = st.selectbox("Layout style:", ["Compact", "Detailed"], 
+                                                           help="Compact layout for large diagrams")
                         
-                        # Circular dependency detection
-                        if show_circular:
-                            try:
-                                cycles = list(nx.simple_cycles(scene_subgraph))
-                                if cycles:
-                                    st.warning(f"⚠️ Found {len(cycles)} circular dependencies:")
-                                    for i, cycle in enumerate(cycles[:5]):  # Show first 5
-                                        cycle_str = " → ".join([os.path.basename(node) for node in cycle])
-                                        st.text(f"{i+1}. {cycle_str}")
-                                    if len(cycles) > 5:
-                                        st.text(f"... and {len(cycles) - 5} more")
-                                else:
-                                    st.success("✅ No circular dependencies found")
-                            except Exception as e:
-                                st.error(f"Error detecting cycles: {str(e)}")
+                        # Apply filters to reduce diagram size
+                        filtered_nodes = list(scene_subgraph.nodes())
                         
-                        # Orphaned assets detection
-                        if show_orphaned:
-                            all_referenced = set()
-                            for deps in analyzer.scene_dependencies.values():
-                                all_referenced.update(deps)
-                            
-                            all_assets = set(analyzer.scene_dependencies.keys())
-                            orphaned = all_assets - all_referenced
-                            orphaned = {asset for asset in orphaned if not asset.endswith('.unity')}
-                            
-                            if orphaned:
-                                st.warning(f"⚠️ Found {len(orphaned)} potentially orphaned assets:")
-                                for asset in list(orphaned)[:10]:  # Show first 10
-                                    st.text(f"• {os.path.basename(asset)}")
-                                if len(orphaned) > 10:
-                                    st.text(f"... and {len(orphaned) - 10} more")
-                            else:
-                                st.success("✅ No orphaned assets found")
+                        # Filter by node type if specified
+                        if node_type_filter != "All":
+                            type_map = {"Scripts only": "script", "Prefabs only": "prefab", "Assets only": "asset"}
+                            filtered_nodes = [n for n in filtered_nodes 
+                                            if analyzer.node_types.get(n) == type_map[node_type_filter]]
                         
-                        # Generate Mermaid diagram
+                        # Limit number of nodes
+                        if len(filtered_nodes) > max_nodes:
+                            # Prioritize nodes with more connections
+                            node_degrees = [(n, scene_subgraph.degree(n)) for n in filtered_nodes]
+                            node_degrees.sort(key=lambda x: x[1], reverse=True)
+                            filtered_nodes = [n for n, _ in node_degrees[:max_nodes]]
+                            st.info(f"📊 Showing top {len(filtered_nodes)} most connected nodes")
+                        
+                        # Create filtered subgraph
+                        filtered_subgraph = scene_subgraph.subgraph(filtered_nodes).copy()
+                        
+                        # Generate simplified diagram
+                        mermaid_diagram = analyzer.generate_simplified_mermaid_diagram(
+                            filtered_subgraph, 
+                            f"Dependencies for {os.path.basename(scene)} (Filtered)",
+                            show_full_labels=show_labels,
+                            layout_style=layout_style
+                        )
+                    else:
+                        # Normal size diagram
                         mermaid_diagram = analyzer.generate_mermaid_diagram(
                             scene_subgraph, 
                             f"Dependencies for {os.path.basename(scene)}"
                         )
-                        
-                        # Display diagram with user-configurable height
-                        st.markdown("### 📊 Dependency Diagram")
-                        
-                        # Add diagram size controls
+                    
+                    # Diagram controls in a separate form to avoid reruns
+                    with st.form(f"diagram_controls_{scene}", clear_on_submit=False):
                         col1, col2, col3 = st.columns([2, 1, 1])
                         with col1:
                             diagram_height = st.slider(
                                 "Diagram Height (pixels)", 
                                 min_value=400, 
                                 max_value=1200, 
-                                value=800,
+                                value=600,  # Reduced default for large diagrams
                                 step=50,
                                 help="Adjust the height of the dependency diagram for better visibility"
                             )
                         with col2:
                             fullscreen_mode = st.checkbox("Fullscreen Mode", value=False, help="Use maximum width for the diagram")
                         with col3:
-                            zoom_level = st.selectbox("Zoom Level", ["Small", "Medium", "Large"], index=1)
+                            zoom_level = st.selectbox("Zoom Level", ["Small", "Medium", "Large"], index=0)  # Default to Small for large diagrams
                         
-                        # Apply zoom level to height
-                        zoom_multipliers = {"Small": 0.8, "Medium": 1.0, "Large": 1.3}
-                        adjusted_height = int(diagram_height * zoom_multipliers[zoom_level])
+                        diagram_update = st.form_submit_button("🔄 Update Diagram")
+                    
+                    # Apply zoom level to height
+                    zoom_multipliers = {"Small": 0.8, "Medium": 1.0, "Large": 1.3}
+                    adjusted_height = int(diagram_height * zoom_multipliers[zoom_level])
+                    
+                    # Try to render diagram with error handling
+                    diagram_rendered = False
+                    
+                    try:
+                        # Check diagram size before rendering
+                        diagram_lines = len(mermaid_diagram.split('\n'))
+                        diagram_chars = len(mermaid_diagram)
                         
-                        try:
+                        if diagram_chars > 10000:  # Mermaid has text size limits
+                            st.warning(f"⚠️ Diagram too large ({diagram_chars} characters). Showing text version instead.")
+                            st.code(mermaid_diagram, language="mermaid")
+                            st.info("💡 **Tip**: Use the filters above to reduce diagram size, or copy the code to [Mermaid Live Editor](https://mermaid.live/)")
+                        else:
                             # Use container width based on fullscreen mode
                             if fullscreen_mode:
                                 stmd.st_mermaid(mermaid_diagram, height=adjusted_height, width="100%")
                             else:
                                 stmd.st_mermaid(mermaid_diagram, height=adjusted_height)
-                                
-                            # Add tips for better diagram viewing
-                            with st.expander("💡 Diagram Viewing Tips"):
-                                st.markdown("""
-                                **For Better Visibility:**
-                                - **Increase Height**: Use the slider above to make the diagram taller
-                                - **Fullscreen Mode**: Enable for wider diagrams with many nodes
-                                - **Zoom Level**: Choose 'Large' for complex diagrams with many dependencies
-                                - **Browser Zoom**: Use Ctrl+/Cmd+ to zoom in your browser
-                                - **Download**: Save the Mermaid file to view in external tools like Mermaid Live Editor
-                                """)
-                                
-                        except Exception as e:
-                            st.warning(f"Could not render interactive diagram: {str(e)}")
-                            st.markdown("**Mermaid Code (copy to external viewer if needed):**")
-                            st.code(mermaid_diagram, language="mermaid")
-                            st.info("💡 **Tip**: Copy the code above and paste it into [Mermaid Live Editor](https://mermaid.live/) for interactive viewing.")
+                            diagram_rendered = True
+                            
+                    except Exception as e:
+                        st.error(f"❌ Could not render diagram: {str(e)}")
+                        st.info("📝 **Fallback**: Showing diagram code instead")
+                        st.code(mermaid_diagram, language="mermaid")
+                    
+                    # Add tips for better diagram viewing
+                    with st.expander("💡 Diagram Viewing Tips"):
+                        st.markdown("""
+                        **For Large Unity Projects:**
+                        - **Use Filters**: Enable diagram filters above to focus on specific node types
+                        - **Reduce Max Nodes**: Lower the node limit (try 20-30 for very large projects)
+                        - **External Viewer**: Copy the Mermaid code to [Mermaid Live Editor](https://mermaid.live/) for better performance
+                        - **Focus Analysis**: Analyze individual scenes rather than multiple scenes at once
                         
-                        # Download options
+                        **For Better Visibility:**
+                        - **Increase Height**: Use the slider above to make the diagram taller
+                        - **Fullscreen Mode**: Enable for wider diagrams with many nodes
+                        - **Zoom Level**: Choose 'Small' for complex diagrams to fit more content
+                        - **Browser Zoom**: Use Ctrl+/Cmd+ to zoom in your browser
+                        """)
+                    
+                    # Alternative visualization for very large diagrams
+                    if not diagram_rendered or total_nodes > 100:
+                        st.markdown("### 📋 Alternative: Text-Based Dependency List")
+                        
+                        # Create a simplified text view
+                        with st.expander("📝 Dependency List (Text View)"):
+                            for source, target in list(scene_subgraph.edges())[:50]:  # Show first 50
+                                source_type = analyzer.node_types.get(source, 'unknown')
+                                target_type = analyzer.node_types.get(target, 'unknown')
+                                st.text(f"{os.path.basename(source)} ({source_type}) → {os.path.basename(target)} ({target_type})")
+                            
+                            if len(scene_subgraph.edges()) > 50:
+                                st.text(f"... and {len(scene_subgraph.edges()) - 50} more dependencies")
+                        
+                        # Statistics overview
+                        st.markdown("### 📊 Dependency Statistics")
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Total Dependencies", len(scene_subgraph.edges()))
+                        with col2:
+                            script_deps = len([e for e in scene_subgraph.edges() if analyzer.node_types.get(e[0]) == 'script'])
+                            st.metric("Script Dependencies", script_deps)
+                        with col3:
+                            prefab_deps = len([e for e in scene_subgraph.edges() if analyzer.node_types.get(e[0]) == 'prefab'])
+                            st.metric("Prefab Dependencies", prefab_deps)
+                    
+                    # Download options
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.download_button(
+                            "📥 Download Mermaid Diagram",
+                            mermaid_diagram,
+                            file_name=f"{os.path.splitext(os.path.basename(scene))[0]}_dependencies.mmd",
+                            mime="text/plain",
+                            key=f"download_mermaid_{scene}"
+                        )
+                    
+                    with col2:
+                        # Create dependency table
+                        dependencies_data = []
+                        for source, target in scene_subgraph.edges():
+                            dependencies_data.append({
+                                "Source": os.path.basename(source),
+                                "Target": os.path.basename(target),
+                                "Source Type": analyzer.node_types.get(source, 'unknown'),
+                                "Target Type": analyzer.node_types.get(target, 'unknown'),
+                                "Source Path": source,
+                                "Target Path": target
+                            })
+                        
+                        if dependencies_data:
+                            df = pd.DataFrame(dependencies_data)
+                            csv = df.to_csv(index=False)
+                            st.download_button(
+                                "📥 Download Dependency Table (CSV)",
+                                csv,
+                                file_name=f"{os.path.splitext(os.path.basename(scene))[0]}_dependencies.csv",
+                                mime="text/csv",
+                                key=f"download_csv_{scene}"
+                            )
+                    
+                    # Performance insights
+                    if dependencies_data:
+                        st.markdown("### 🎯 Performance Insights")
+                        
+                        # Most referenced assets
+                        target_counts = {}
+                        for dep in dependencies_data:
+                            target = dep["Target"]
+                            target_counts[target] = target_counts.get(target, 0) + 1
+                        
+                        top_referenced = sorted(target_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+                        
                         col1, col2 = st.columns(2)
                         with col1:
-                            st.download_button(
-                                "📥 Download Mermaid Diagram",
-                                mermaid_diagram,
-                                file_name=f"{os.path.splitext(os.path.basename(scene))[0]}_dependencies.mmd",
-                                mime="text/plain"
-                            )
+                            st.markdown("**Most Referenced Assets:**")
+                            for asset, count in top_referenced:
+                                st.text(f"• {asset} ({count} references)")
                         
                         with col2:
-                            # Create dependency table
-                            dependencies_data = []
-                            for source, target in scene_subgraph.edges():
-                                dependencies_data.append({
-                                    "Source": os.path.basename(source),
-                                    "Target": os.path.basename(target),
-                                    "Source Type": analyzer.node_types.get(source, 'unknown'),
-                                    "Target Type": analyzer.node_types.get(target, 'unknown'),
-                                    "Source Path": source,
-                                    "Target Path": target
-                                })
+                            # Dependency complexity score
+                            script_complexity = len([d for d in dependencies_data if d["Source Type"] == "script"])
+                            total_deps = len(dependencies_data)
+                            complexity_score = min(100, (script_complexity / max(total_deps, 1)) * 100)
                             
-                            # Performance insights
-                            if dependencies_data:
-                                st.markdown("### 🎯 Performance Insights")
-                                
-                                # Most referenced assets
-                                target_counts = {}
-                                for dep in dependencies_data:
-                                    target = dep["Target"]
-                                    target_counts[target] = target_counts.get(target, 0) + 1
-                                
-                                top_referenced = sorted(target_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-                                
-                                col1, col2 = st.columns(2)
-                                with col1:
-                                    st.markdown("**Most Referenced Assets:**")
-                                    for asset, count in top_referenced:
-                                        st.text(f"• {asset} ({count} references)")
-                                
-                                with col2:
-                                    # Dependency complexity score
-                                    script_complexity = len([d for d in dependencies_data if d["Source Type"] == "script"])
-                                    total_deps = len(dependencies_data)
-                                    complexity_score = min(100, (script_complexity / max(total_deps, 1)) * 100)
-                                    
-                                    st.metric(
-                                        "Script Coupling Score", 
-                                        f"{complexity_score:.1f}%",
-                                        help="Lower is better. High coupling may indicate refactoring opportunities."
-                                    )
-                            
-                            if dependencies_data:
-                                df = pd.DataFrame(dependencies_data)
-                                csv = df.to_csv(index=False)
-                                st.download_button(
-                                    "📥 Download Dependency Table (CSV)",
-                                    csv,
-                                    file_name=f"{os.path.splitext(os.path.basename(scene))[0]}_dependencies.csv",
-                                    mime="text/csv"
-                                )
-                        
-                        # Detailed dependency table
-                        if dependencies_data:
-                            st.markdown("### 📊 Detailed Dependencies")
-                            st.dataframe(
-                                df[["Source", "Target", "Source Type", "Target Type"]], 
-                                use_container_width=True
+                            st.metric(
+                                "Script Coupling Score", 
+                                f"{complexity_score:.1f}%",
+                                help="Lower is better. High coupling may indicate refactoring opportunities."
                             )
-                        
-                        # AI Enhanced Analysis Section
-                        if ai_enhanced and avalai_api_key and dependencies_data:
-                            st.markdown("---")
-                            st.markdown("### 🤖 AI Enhanced Analysis")
-                            st.info("🔄 Performing AI-powered analysis using AvalAI...")
-                            
-                            # Initialize AI analyzer
-                            ai_analyzer = AIEnhancedAnalysis(avalai_api_key)
-                            
-                            # Create tabs for different AI analyses
-                            ai_tab1, ai_tab2, ai_tab3, ai_tab4 = st.tabs([
-                                "🔄 Execution Flow", 
-                                "🐛 Bug Detection", 
-                                "⚠️ Corner Cases", 
-                                "⚡ Optimization"
-                            ])
-                            
-                            with ai_tab1:
-                                st.markdown("#### Scene Execution Flow Analysis")
-                                with st.spinner("Analyzing execution flow..."):
-                                    scene_data = {"name": os.path.basename(scene)}
-                                    flow_analysis = ai_analyzer.analyze_scene_execution_flow(
-                                        scene_data, 
-                                        {k: v for k, v in analyzer.scene_dependencies.items() if k == scene}
-                                    )
-                                
-                                if "API Error" not in flow_analysis:
-                                    st.markdown(flow_analysis)
-                                    
-                                    # Download flow analysis
-                                    st.download_button(
-                                        "📥 Download Flow Analysis",
-                                        flow_analysis,
-                                        file_name=f"{os.path.splitext(os.path.basename(scene))[0]}_flow_analysis.md",
-                                        mime="text/markdown"
-                                    )
-                                else:
-                                    st.error(f"Flow analysis failed: {flow_analysis}")
-                            
-                            with ai_tab2:
-                                st.markdown("#### Potential Bug Detection")
-                                with st.spinner("Detecting potential bugs..."):
-                                    bug_analysis = ai_analyzer.detect_potential_bugs(
-                                        analyzer.script_dependencies,
-                                        analyzer.scene_dependencies
-                                    )
-                                
-                                if "API Error" not in bug_analysis:
-                                    st.markdown(bug_analysis)
-                                    
-                                    # Highlight critical issues
-                                    if any(keyword in bug_analysis.lower() for keyword in ['critical', 'severe', 'high risk']):
-                                        st.error("🚨 Critical issues detected! Please review the analysis above.")
-                                    elif any(keyword in bug_analysis.lower() for keyword in ['warning', 'potential', 'moderate']):
-                                        st.warning("⚠️ Potential issues found. Consider reviewing the recommendations.")
-                                    else:
-                                        st.success("✅ No major issues detected in the analysis.")
-                                    
-                                    st.download_button(
-                                        "📥 Download Bug Analysis",
-                                        bug_analysis,
-                                        file_name=f"{os.path.splitext(os.path.basename(scene))[0]}_bug_analysis.md",
-                                        mime="text/markdown"
-                                    )
-                                else:
-                                    st.error(f"Bug detection failed: {bug_analysis}")
-                            
-                            with ai_tab3:
-                                st.markdown("#### Corner Cases & Edge Scenarios")
-                                with st.spinner("Identifying corner cases..."):
-                                    corner_analysis = ai_analyzer.identify_corner_cases(
-                                        scene_subgraph,
-                                        analyzer.node_types
-                                    )
-                                
-                                if "API Error" not in corner_analysis:
-                                    st.markdown(corner_analysis)
-                                    
-                                    st.download_button(
-                                        "📥 Download Corner Case Analysis",
-                                        corner_analysis,
-                                        file_name=f"{os.path.splitext(os.path.basename(scene))[0]}_corner_cases.md",
-                                        mime="text/markdown"
-                                    )
-                                else:
-                                    st.error(f"Corner case analysis failed: {corner_analysis}")
-                            
-                            with ai_tab4:
-                                st.markdown("#### Optimization Suggestions")
-                                with st.spinner("Generating optimization suggestions..."):
-                                    # Compile analysis results
-                                    optimization_data = {
-                                        "scene": os.path.basename(scene),
-                                        "total_dependencies": len(dependencies_data),
-                                        "script_count": len([d for d in dependencies_data if d["Source Type"] == "script"]),
-                                        "prefab_count": len([d for d in dependencies_data if d["Source Type"] == "prefab"]),
-                                        "complexity_score": complexity_score if 'complexity_score' in locals() else 0,
-                                        "circular_deps": len(cycles) if 'cycles' in locals() else 0
-                                    }
-                                    
-                                    optimization_suggestions = ai_analyzer.generate_optimization_suggestions(optimization_data)
-                                
-                                if "API Error" not in optimization_suggestions:
-                                    st.markdown(optimization_suggestions)
-                                    
-                                    # Add implementation checklist
-                                    with st.expander("📋 Implementation Checklist"):
-                                        st.markdown("""
-                                        **Before implementing optimizations:**
-                                        - [ ] Backup your project
-                                        - [ ] Test in a separate branch
-                                        - [ ] Profile performance before changes
-                                        - [ ] Implement changes incrementally
-                                        - [ ] Test thoroughly after each change
-                                        - [ ] Monitor performance improvements
-                                        """)
-                                    
-                                    st.download_button(
-                                        "📥 Download Optimization Guide",
-                                        optimization_suggestions,
-                                        file_name=f"{os.path.splitext(os.path.basename(scene))[0]}_optimization.md",
-                                        mime="text/markdown"
-                                    )
-                                else:
-                                    st.error(f"Optimization analysis failed: {optimization_suggestions}")
-                            
-                            # AI Analysis Summary
-                            st.markdown("#### 🎯 AI Analysis Summary")
-                            col1, col2, col3 = st.columns(3)
-                            
-                            with col1:
-                                st.metric(
-                                    "Analysis Depth", 
-                                    "Advanced",
-                                    help="AI-powered deep analysis completed"
-                                )
-                            with col2:
-                                st.metric(
-                                    "Issues Scanned", 
-                                    "Multi-layer",
-                                    help="Flow, bugs, corner cases, and optimization analyzed"
-                                )
-                            with col3:
-                                st.metric(
-                                    "Recommendations", 
-                                    "Actionable",
-                                    help="Specific implementation suggestions provided"
-                                )
-                        
+                    
+                    # Detailed dependency table
+                    if dependencies_data:
+                        st.markdown("### 📊 Detailed Dependencies")
+                        st.dataframe(
+                            df[["Source", "Target", "Source Type", "Target Type"]], 
+                            use_container_width=True
+                        )
+                    
+                    # AI Enhanced Analysis Section
+                    if st.session_state.ai_enhanced and st.session_state.avalai_api_key and dependencies_data:
                         st.markdown("---")
-                    else:
-                        st.warning(f"Scene {scene} not found in dependency graph.")
+                        st.markdown("### 🤖 AI Enhanced Analysis")
+                        st.info("🔄 Performing AI-powered analysis using AvalAI...")
+                        
+                        # Initialize AI analyzer
+                        ai_analyzer = AIEnhancedAnalysis(st.session_state.avalai_api_key)
+                        
+                        # Create tabs for different AI analyses
+                        ai_tab1, ai_tab2, ai_tab3, ai_tab4 = st.tabs([
+                            "🔄 Execution Flow", 
+                            "🐛 Bug Detection", 
+                            "⚠️ Corner Cases", 
+                            "⚡ Optimization"
+                        ])
+                        
+                        with ai_tab1:
+                            st.markdown("#### Scene Execution Flow Analysis")
+                            with st.spinner("Analyzing execution flow..."):
+                                scene_data = {"name": os.path.basename(scene)}
+                                flow_analysis = ai_analyzer.analyze_scene_execution_flow(
+                                    scene_data, 
+                                    {k: v for k, v in analyzer.scene_dependencies.items() if k == scene}
+                                )
+                            
+                            if "API Error" not in flow_analysis:
+                                st.markdown(flow_analysis)
+                                
+                                # Download flow analysis
+                                st.download_button(
+                                    "📥 Download Flow Analysis",
+                                    flow_analysis,
+                                    file_name=f"{os.path.splitext(os.path.basename(scene))[0]}_flow_analysis.md",
+                                    mime="text/markdown",
+                                    key=f"download_flow_{scene}"
+                                )
+                            else:
+                                st.error(f"Flow analysis failed: {flow_analysis}")
+                        
+                        with ai_tab2:
+                            st.markdown("#### Potential Bug Detection")
+                            with st.spinner("Detecting potential bugs..."):
+                                bug_analysis = ai_analyzer.detect_potential_bugs(
+                                    analyzer.script_dependencies,
+                                    analyzer.scene_dependencies
+                                )
+                            
+                            if "API Error" not in bug_analysis:
+                                st.markdown(bug_analysis)
+                                
+                                # Highlight critical issues
+                                if any(keyword in bug_analysis.lower() for keyword in ['critical', 'severe', 'high risk']):
+                                    st.error("🚨 Critical issues detected! Please review the analysis above.")
+                                elif any(keyword in bug_analysis.lower() for keyword in ['warning', 'potential', 'moderate']):
+                                    st.warning("⚠️ Potential issues found. Consider reviewing the recommendations.")
+                                else:
+                                    st.success("✅ No major issues detected in the analysis.")
+                                
+                                st.download_button(
+                                    "📥 Download Bug Analysis",
+                                    bug_analysis,
+                                    file_name=f"{os.path.splitext(os.path.basename(scene))[0]}_bug_analysis.md",
+                                    mime="text/markdown",
+                                    key=f"download_bug_{scene}"
+                                )
+                            else:
+                                st.error(f"Bug detection failed: {bug_analysis}")
+                        
+                        with ai_tab3:
+                            st.markdown("#### Corner Cases & Edge Scenarios")
+                            with st.spinner("Identifying corner cases..."):
+                                corner_analysis = ai_analyzer.identify_corner_cases(
+                                    scene_subgraph,
+                                    analyzer.node_types
+                                )
+                            
+                            if "API Error" not in corner_analysis:
+                                st.markdown(corner_analysis)
+                                
+                                st.download_button(
+                                    "📥 Download Corner Case Analysis",
+                                    corner_analysis,
+                                    file_name=f"{os.path.splitext(os.path.basename(scene))[0]}_corner_cases.md",
+                                    mime="text/markdown",
+                                    key=f"download_corner_{scene}"
+                                )
+                            else:
+                                st.error(f"Corner case analysis failed: {corner_analysis}")
+                        
+                        with ai_tab4:
+                            st.markdown("#### Optimization Suggestions")
+                            with st.spinner("Generating optimization suggestions..."):
+                                # Compile analysis results
+                                optimization_data = {
+                                    "scene": os.path.basename(scene),
+                                    "total_dependencies": len(dependencies_data),
+                                    "script_count": len([d for d in dependencies_data if d["Source Type"] == "script"]),
+                                    "prefab_count": len([d for d in dependencies_data if d["Source Type"] == "prefab"]),
+                                    "complexity_score": complexity_score if 'complexity_score' in locals() else 0,
+                                    "circular_deps": len(cycles) if 'cycles' in locals() else 0
+                                }
+                                
+                                optimization_suggestions = ai_analyzer.generate_optimization_suggestions(optimization_data)
+                            
+                            if "API Error" not in optimization_suggestions:
+                                st.markdown(optimization_suggestions)
+                                
+                                # Add implementation checklist
+                                with st.expander("📋 Implementation Checklist"):
+                                    st.markdown("""
+                                    **Before implementing optimizations:**
+                                    - [ ] Backup your project
+                                    - [ ] Test in a separate branch
+                                    - [ ] Profile performance before changes
+                                    - [ ] Implement changes incrementally
+                                    - [ ] Test thoroughly after each change
+                                    - [ ] Monitor performance improvements
+                                    """)
+                                
+                                st.download_button(
+                                    "📥 Download Optimization Guide",
+                                    optimization_suggestions,
+                                    file_name=f"{os.path.splitext(os.path.basename(scene))[0]}_optimization.md",
+                                    mime="text/markdown",
+                                    key=f"download_opt_{scene}"
+                                )
+                            else:
+                                st.error(f"Optimization analysis failed: {optimization_suggestions}")
+                        
+                        # AI Analysis Summary
+                        st.markdown("#### 🎯 AI Analysis Summary")
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            st.metric(
+                                "Analysis Depth", 
+                                "Advanced",
+                                help="AI-powered deep analysis completed"
+                            )
+                        with col2:
+                            st.metric(
+                                "Issues Scanned", 
+                                "Multi-layer",
+                                help="Flow, bugs, corner cases, and optimization analyzed"
+                            )
+                        with col3:
+                            st.metric(
+                                "Recommendations", 
+                                "Actionable",
+                                help="Specific implementation suggestions provided"
+                            )
+                    
+                    st.markdown("---")
+                else:
+                    st.warning(f"Scene {scene} not found in dependency graph.")
+        
+        elif analyze_scenes and not selected_scenes:
+            st.warning("Please select at least one scene to analyze, or enable 'Use Random Sample' for large projects.")
     else:
         st.info("No scenes found in the uploaded project. Please ensure you uploaded a complete Unity project with scene files.")
         
@@ -1423,27 +1707,41 @@ if st.session_state.analyzer.dependency_graph is not None:
                     st.info("Rebuilding dependency graph...")
                     analyzer.dependency_graph, analyzer.node_types = analyzer.build_dependency_graph(analyzer.project_root)
                     
-                    st.success("Re-analysis complete! Check above for results.")
-                    st.experimental_rerun()
+                    # Update analysis complete flag
+                    st.session_state.analysis_complete = True
+                    
+                    st.success("Re-analysis complete! Please refresh the page to see results.")
             else:
                 st.warning("No project loaded. Please upload a project first.")
 else:
-    st.info("👆 Please upload a Unity project ZIP file and analyze it to begin dependency analysis.")
+    st.info("👆 Please upload a Unity project and analyze it to begin dependency analysis.")
+    
+    # Show current state
+    if st.session_state.analyzer.dependency_graph is not None:
+        st.info("✅ Project analyzed! Analysis results are ready above.")
     
     # Example usage section
     with st.expander("📖 How to Use"):
         st.markdown("""
         ### Steps to Analyze Your Unity Project:
         
-        1. **Enable AI Enhancement** (Optional): Toggle AI analysis and enter your AvalAI API key
-        2. **Prepare Project**: Create a ZIP file of your Unity project (see sidebar for instructions)
-        3. **Upload Project**: Use the file uploader to upload your Unity project ZIP
-        4. **Analyze Project**: Click "Analyze Project" to scan all files and build dependency graph
-        5. **Select Scenes**: Choose which scenes you want to analyze from the dropdown
-        6. **Configure Options**: Adjust analysis settings like dependency depth and included types
-        7. **Generate Analysis**: Click "Analyze Selected Scenes" to generate dependency graphs
-        8. **AI Enhancement**: If enabled, get advanced AI-powered insights
-        9. **Download Results**: Save Mermaid diagrams, CSV tables, and AI analysis reports
+        1. **Configure Settings**: Use the sidebar forms to set your preferences without page reloads
+        2. **Enable AI Enhancement** (Optional): Toggle AI analysis and enter your AvalAI API key
+        3. **Prepare Project**: Create a ZIP file of your Unity project (see sidebar for instructions)
+        4. **Upload Project**: Use the file uploader to upload your Unity project ZIP
+        5. **Analyze Project**: Click "Analyze Project" to scan all files and build dependency graph
+        6. **Configure Analysis**: Use the scene analysis form to set your analysis options
+        7. **Analyze Scenes**: Click "Analyze Selected Scenes" to generate dependency graphs
+        8. **Adjust Diagram**: Use the diagram controls to customize visualization
+        9. **AI Enhancement**: If enabled, get advanced AI-powered insights
+        10. **Download Results**: Save Mermaid diagrams, CSV tables, and AI analysis reports
+        
+        ### 🔧 Form-Based Interface Benefits:
+        
+        - **No Page Reloads**: Settings forms prevent unnecessary reruns
+        - **Preserved State**: Your analysis and uploads are maintained between setting changes
+        - **Better Performance**: Only updates when you submit forms
+        - **Smooth Workflow**: Change settings without losing progress
         
         ### What This Tool Analyzes:
         
@@ -1493,4 +1791,4 @@ else:
 
 # Footer
 st.markdown("---")
-st.markdown("**Unity Dependency Analyzer** - Built for Unity developers to understand project structure and dependencies. Now with AI-powered insights! 🚀🤖")
+st.markdown("**Unity Dependency Analyzer** - Built for Unity developers to understand project structure and dependencies. Now with AI-powered insights and smooth form-based interface! 🚀🤖✨")
